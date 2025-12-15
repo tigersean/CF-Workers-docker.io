@@ -670,6 +670,12 @@ function httpHandler(req, pathname, baseHost) {
 	let urlStr = pathname;
 
 	const urlObj = newUrl(urlStr, 'https://' + baseHost);
+	
+    if (url.hostname.includes('docker.io') || url.hostname.includes('registry-1')) {
+    	if (env.DOCKER_TOKEN_B64) {
+    		newHeaders.set('Authorization', `Basic ${env.DOCKER_TOKEN_B64}`);
+   		}
+    }
 
 	/** @type {RequestInit} */
 	const reqInit = {
