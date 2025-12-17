@@ -7,7 +7,6 @@ const auth_url = 'https://auth.docker.io';
 
 let 屏蔽爬虫UA = ['netcraft'];
 
-// 根据主机名选择对应的上游地址
 function routeByHosts(host) {
 	const routes = {
 		"quay": "quay.io",
@@ -23,7 +22,6 @@ function routeByHosts(host) {
 	else return [hub_host, true];
 }
 
-/** @type {RequestInit} */
 const PREFLIGHT_INIT = {
 	headers: new Headers({
 		'access-control-allow-origin': '*',
@@ -32,30 +30,25 @@ const PREFLIGHT_INIT = {
 	}),
 }
 
-function makeRes(body, status = 200, headers = {}) {
-	headers['access-control-allow-origin'] = '*'
-	return new Response(body, { status, headers })
-}
-
 function newUrl(urlStr, base) {
-	try {
-		return new URL(urlStr, base);
-	} catch (err) {
-		return null
-	}
+	try { return new URL(urlStr, base); } catch (err) { return null }
 }
 
 export default {
 	async fetch(request, env, ctx) {
 		const getReqHeader = (key) => request.headers.get(key);
-
 		let url = new URL(request.url);
-		const userAgentHeader = request.headers.get('User-Agent');
-		const userAgent = userAgentHeader ? userAgentHeader.toLowerCase() : "null";
-		if (env.UA) 屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
 		const workers_url = `https://${url.hostname}`;
 
-		// 获取配置的 Docker Token，并去除可能存在的换行符
+        // === 调试接口：检查环境变量是否生效 ===
+        if (url.pathname === '/auth-debug') {
+            const hasToken = !!env.DOCKER_TOKEN_B64;
+            const tokenLen = env.DOCKER_TOKEN_B64 ? env.DOCKER_TOKEN_B64.length : 0;
+            const tokenSample = env.DOCKER_TOKEN_B64 ? env.DOCKER_TOKEN_B64.substring(0, 4) + "..." : "N/A";
+            return new Response(`Environment Variable Check:\nDOCKER_TOKEN_B64 Set: ${hasToken}\nLength: ${tokenLen}\nSample: ${tokenSample}\n\nIf Set is false, please configure it in Cloudflare Dashboard.`, { status: 200 });
+        }
+
+		// 获取配置的 Docker Token
 		const DOCKER_AUTH_B64 = env.DOCKER_TOKEN_B64 ? env.DOCKER_TOKEN_B64.trim() : "";
 
 		const ns = url.searchParams.get('ns');
@@ -64,11 +57,8 @@ export default {
 
 		let checkHost;
 		if (ns) {
-			if (ns === 'docker.io') {
-				hub_host = 'registry-1.docker.io';
-			} else {
-				hub_host = ns;
-			}
+			if (ns === 'docker.io') hub_host = 'registry-1.docker.io';
+			else hub_host = ns;
 		} else {
 			checkHost = routeByHosts(hostTop);
 			hub_host = checkHost[0];
@@ -76,25 +66,19 @@ export default {
 
 		const fakePage = checkHost ? checkHost[1] : false;
 		url.hostname = hub_host;
-		const hubParams = ['/v1/search', '/v1/repositories'];
-		
-		if (屏蔽爬虫UA.some(fxxk => userAgent.includes(fxxk)) && 屏蔽爬虫UA.length > 0) {
-			return new Response("Blocked", { status: 403 });
-		} else if ((userAgent && userAgent.includes('mozilla')) || hubParams.some(param => url.pathname.includes(param))) {
-			if (url.pathname == '/') {
-                if (env.URL302) return Response.redirect(env.URL302, 302);
-                else if (env.URL) return fetch(new Request(env.URL, request));
-                else return new Response("Docker Proxy Running", { status: 200 });
-			} else {
-				if (url.pathname.startsWith('/v1/')) url.hostname = 'index.docker.io';
-				else if (fakePage) url.hostname = 'hub.docker.com';
-				
-                if (url.searchParams.get('q')?.includes('library/') && url.searchParams.get('q') != 'library/') {
-					url.searchParams.set('q', url.searchParams.get('q').replace('library/', ''));
-				}
-				return fetch(new Request(url, request));
-			}
-		}
+
+        // 首页处理
+        if (url.pathname == '/') {
+            return new Response("Docker Proxy Running. Set DOCKER_TOKEN_B64 to avoid rate limits.", { status: 200 });
+        }
+
+		// 路径修正
+		if (url.pathname.startsWith('/v1/')) url.hostname = 'index.docker.io';
+		else if (fakePage) url.hostname = 'hub.docker.com';
+
+        if (url.searchParams.get('q')?.includes('library/') && url.searchParams.get('q') != 'library/') {
+            url.searchParams.set('q', url.searchParams.get('q').replace('library/', ''));
+        }
 
 		if (!/%2F/.test(url.search) && /%3A/.test(url.toString())) {
 			let modifiedUrl = url.toString().replace(/%3A(?=.*?&)/, '%3Alibrary%2F');
@@ -111,11 +95,11 @@ export default {
 					'User-Agent': getReqHeader("User-Agent"),
 					'Accept': getReqHeader("Accept"),
 					'Accept-Language': getReqHeader("Accept-Language"),
-					'Accept-Encoding': getReqHeader("Accept-Encoding"),
 					'Connection': 'keep-alive',
 					'Cache-Control': 'max-age=0'
 				}
 			};
+			// 只有在请求 Token 时才注入 Basic Auth
 			if (DOCKER_AUTH_B64) {
 				token_parameter.headers['Authorization'] = `Basic ${DOCKER_AUTH_B64}`;
 			}
@@ -142,9 +126,7 @@ export default {
 		) {
 			let repo = '';
 			const v2Match = url.pathname.match(/^\/v2\/(.+?)(?:\/(manifests|blobs|tags)\/)/);
-			if (v2Match) {
-				repo = v2Match[1];
-			}
+			if (v2Match) repo = v2Match[1];
 			
 			// 如果配置了账号密码，尝试获取 Token
 			if (repo && DOCKER_AUTH_B64) {
@@ -152,35 +134,29 @@ export default {
 				const tokenHeaders = {
 					'User-Agent': getReqHeader("User-Agent"),
 					'Accept': getReqHeader("Accept"),
-					'Authorization': `Basic ${DOCKER_AUTH_B64}`
+					'Authorization': `Basic ${DOCKER_AUTH_B64}` // 获取 Token 使用 Basic
 				};
 
 				const tokenRes = await fetch(tokenUrl, { headers: tokenHeaders });
 				
-				// 【关键修改】如果获取 Token 失败，直接返回错误，不再尝试匿名请求
 				if (!tokenRes.ok) {
                     const errText = await tokenRes.text();
-                    console.error(`Token fetch failed: ${tokenRes.status} ${errText}`);
-					return new Response(`[Auth Error] Failed to get token from Docker Hub. Status: ${tokenRes.status}. Msg: ${errText}`, { 
-                        status: tokenRes.status,
-                        headers: { 'Content-Type': 'text/plain' }
-                    });
+					return new Response(`[Auth Error] Failed to get token. Status: ${tokenRes.status}. Msg: ${errText}`, { status: tokenRes.status });
 				}
 
 				const tokenData = await tokenRes.json();
 				const token = tokenData.token;
 				
-				// 使用获取到的 Token 请求 Registry
+				// 请求镜像使用 Bearer
 				let parameter = {
 					headers: {
 						'Host': hub_host,
 						'User-Agent': getReqHeader("User-Agent"),
 						'Accept': getReqHeader("Accept"),
 						'Accept-Language': getReqHeader("Accept-Language"),
-						'Accept-Encoding': getReqHeader("Accept-Encoding"),
 						'Connection': 'keep-alive',
 						'Cache-Control': 'max-age=0',
-						'Authorization': `Bearer ${token}`
+						'Authorization': `Bearer ${token}` // 注入 Token
 					},
 					cacheTtl: 3600
 				};
@@ -189,30 +165,12 @@ export default {
 					parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
 				}
 
-				let original_response = await fetch(new Request(url, request), parameter);
-				
-				let response_headers = original_response.headers;
-				let new_response_headers = new Headers(response_headers);
-				let status = original_response.status;
-				
-				if (new_response_headers.get("Www-Authenticate")) {
-					let auth = new_response_headers.get("Www-Authenticate");
-					let re = new RegExp(auth_url, 'g');
-					new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
-				}
-				if (new_response_headers.get("Location")) {
-					return httpHandler(request, new_response_headers.get("Location"), hub_host);
-				}
-				
-				return new Response(original_response.body, {
-					status,
-					headers: new_response_headers
-				});
+				return handleProxy(url, request, parameter, workers_url, hub_host);
 			}
 		}
 
 		// =========================================================
-		// 3. Fallback (没有配置账号，或非 Docker Hub 请求)
+		// 3. Fallback (无账号配置或非 Docker Hub)
 		// =========================================================
 		let parameter = {
 			headers: {
@@ -220,42 +178,52 @@ export default {
 				'User-Agent': getReqHeader("User-Agent"),
 				'Accept': getReqHeader("Accept"),
 				'Accept-Language': getReqHeader("Accept-Language"),
-				'Accept-Encoding': getReqHeader("Accept-Encoding"),
 				'Connection': 'keep-alive',
 				'Cache-Control': 'max-age=0'
 			},
 			cacheTtl: 3600
 		};
 
-		if (request.headers.has("Authorization")) {
-			parameter.headers.Authorization = getReqHeader("Authorization");
-		}
+        // 【重要修复】如果发往 registry-1.docker.io，绝对不要透传客户端的 Authorization (Basic)，否则会报 malformed
+        // 除非我们已经有了 Token (上面的逻辑)，否则这里只能匿名请求
+        if (hub_host === 'registry-1.docker.io') {
+            // 移除 Auth，防止报错
+        } else {
+            // 其他仓库（如 quay.io）可能支持 Basic，可以透传
+            if (request.headers.has("Authorization")) {
+                parameter.headers.Authorization = getReqHeader("Authorization");
+            }
+        }
 
 		if (request.headers.has("X-Amz-Content-Sha256")) {
 			parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
 		}
 
-		let original_response = await fetch(new Request(url, request), parameter);
-		let response_headers = original_response.headers;
-		let new_response_headers = new Headers(response_headers);
-		let status = original_response.status;
-
-		if (new_response_headers.get("Www-Authenticate")) {
-			let auth = new_response_headers.get("Www-Authenticate");
-			let re = new RegExp(auth_url, 'g');
-			new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
-		}
-
-		if (new_response_headers.get("Location")) {
-			return httpHandler(request, new_response_headers.get("Location"), hub_host);
-		}
-
-		return new Response(original_response.body, {
-			status,
-			headers: new_response_headers
-		});
+		return handleProxy(url, request, parameter, workers_url, hub_host);
 	}
 };
+
+async function handleProxy(url, request, parameter, workers_url, hub_host) {
+    let original_response = await fetch(new Request(url, request), parameter);
+    let response_headers = original_response.headers;
+    let new_response_headers = new Headers(response_headers);
+    let status = original_response.status;
+
+    if (new_response_headers.get("Www-Authenticate")) {
+        let auth = new_response_headers.get("Www-Authenticate");
+        let re = new RegExp(auth_url, 'g');
+        new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
+    }
+
+    if (new_response_headers.get("Location")) {
+        return httpHandler(request, new_response_headers.get("Location"), hub_host);
+    }
+
+    return new Response(original_response.body, {
+        status,
+        headers: new_response_headers
+    });
+}
 
 function httpHandler(req, pathname, baseHost) {
 	const reqHdrRaw = req.headers;
@@ -286,11 +254,4 @@ async function proxy(urlObj, reqInit) {
 		status: res.status,
 		headers: resHdrNew
 	});
-}
-
-async function ADD(envadd) {
-	var addtext = envadd.replace(/[	 |"'\r\n]+/g, ',').replace(/,+/g, ',');
-	if (addtext.charAt(0) == ',') addtext = addtext.slice(1);
-	if (addtext.charAt(addtext.length - 1) == ',') addtext = addtext.slice(0, addtext.length - 1);
-	return addtext.split(',');
 }
