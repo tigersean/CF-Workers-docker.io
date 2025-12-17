@@ -507,6 +507,10 @@ export default {
 					'Cache-Control': 'max-age=0'
 				}
 			};
+			// 【修复】Token 请求注入 Auth
+			if (env.DOCKER_TOKEN_B64) {
+				token_parameter.headers['Authorization'] = `Basic ${env.DOCKER_TOKEN_B64}`;
+			}
 			let token_url = auth_url + url.pathname + url.search;
 			return fetch(new Request(token_url, request), token_parameter);
 		}
@@ -536,16 +540,24 @@ export default {
 			}
 			if (repo) {
 				const tokenUrl = `${auth_url}/token?service=registry.docker.io&scope=repository:${repo}:pull`;
+				
+				// 【修复】构造请求 Token 的 Header，注入 Auth
+				const tokenHeaders = {
+					'User-Agent': getReqHeader("User-Agent"),
+					'Accept': getReqHeader("Accept"),
+					'Accept-Language': getReqHeader("Accept-Language"),
+					'Accept-Encoding': getReqHeader("Accept-Encoding"),
+					'Connection': 'keep-alive',
+					'Cache-Control': 'max-age=0'
+				};
+				if (env.DOCKER_TOKEN_B64) {
+					tokenHeaders['Authorization'] = `Basic ${env.DOCKER_TOKEN_B64}`;
+				}
+
 				const tokenRes = await fetch(tokenUrl, {
-					headers: {
-						'User-Agent': getReqHeader("User-Agent"),
-						'Accept': getReqHeader("Accept"),
-						'Accept-Language': getReqHeader("Accept-Language"),
-						'Accept-Encoding': getReqHeader("Accept-Encoding"),
-						'Connection': 'keep-alive',
-						'Cache-Control': 'max-age=0'
-					}
+					headers: tokenHeaders
 				});
+
 				const tokenData = await tokenRes.json();
 				const token = tokenData.token;
 				let parameter = {
@@ -602,9 +614,13 @@ export default {
 			cacheTtl: 3600 // 缓存时间
 		};
 
-		// 添加Authorization头
+		// 添加Authorization头 (处理其他未被捕获的请求，或者非Docker Hub请求)
 		if (request.headers.has("Authorization")) {
 			parameter.headers.Authorization = getReqHeader("Authorization");
+		}
+		// 【修复】如果上方逻辑没有捕获，且是发往 docker.io 的请求，尝试补全 Auth
+		else if (hub_host === 'registry-1.docker.io' && env.DOCKER_TOKEN_B64) {
+			parameter.headers.Authorization = `Basic ${env.DOCKER_TOKEN_B64}`;
 		}
 
 		// 添加可能存在字段X-Amz-Content-Sha256
@@ -671,12 +687,6 @@ function httpHandler(req, pathname, baseHost) {
 
 	const urlObj = newUrl(urlStr, 'https://' + baseHost);
 	
-    if (url.hostname.includes('docker.io') || url.hostname.includes('registry-1')) {
-    	if (env.DOCKER_TOKEN_B64) {
-    		newHeaders.set('Authorization', `Basic ${env.DOCKER_TOKEN_B64}`);
-   		}
-    }
-
 	/** @type {RequestInit} */
 	const reqInit = {
 		method: req.method,
