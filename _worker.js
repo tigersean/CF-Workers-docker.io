@@ -45,34 +45,6 @@ function newUrl(urlStr, base) {
 	}
 }
 
-async function nginx() {
-	return `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
-	<p>For online documentation and support please refer to <a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at <a href="http://nginx.com/">nginx.com</a>.</p>
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
-	`;
-}
-
-async function searchInterface() {
-	// 搜索页面HTML保持不变，为节省篇幅省略，实际部署时请保留原有的HTML内容
-    // 如果您需要搜索界面，请将之前的 HTML 代码粘贴回这里
-    // 简单起见，这里返回一个基础页面
-    return `<!DOCTYPE html><html><head><title>Docker Hub Proxy</title></head><body><h1>Docker Hub Proxy</h1><p>Service is running.</p></body></html>`;
-}
-
 export default {
 	async fetch(request, env, ctx) {
 		const getReqHeader = (key) => request.headers.get(key);
@@ -107,12 +79,12 @@ export default {
 		const hubParams = ['/v1/search', '/v1/repositories'];
 		
 		if (屏蔽爬虫UA.some(fxxk => userAgent.includes(fxxk)) && 屏蔽爬虫UA.length > 0) {
-			return new Response(await nginx(), { headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+			return new Response("Blocked", { status: 403 });
 		} else if ((userAgent && userAgent.includes('mozilla')) || hubParams.some(param => url.pathname.includes(param))) {
 			if (url.pathname == '/') {
                 if (env.URL302) return Response.redirect(env.URL302, 302);
                 else if (env.URL) return fetch(new Request(env.URL, request));
-                else return new Response(await searchInterface(), { headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+                else return new Response("Docker Proxy Running", { status: 200 });
 			} else {
 				if (url.pathname.startsWith('/v1/')) url.hostname = 'index.docker.io';
 				else if (fakePage) url.hostname = 'hub.docker.com';
@@ -144,7 +116,6 @@ export default {
 					'Cache-Control': 'max-age=0'
 				}
 			};
-			// 注入 Basic Auth
 			if (DOCKER_AUTH_B64) {
 				token_parameter.headers['Authorization'] = `Basic ${DOCKER_AUTH_B64}`;
 			}
@@ -158,7 +129,7 @@ export default {
 		}
 
 		// =========================================================
-		// 2. 智能获取 Token 并请求镜像 (针对 manifests/blobs/tags)
+		// 2. 智能获取 Token 并请求镜像
 		// =========================================================
 		if (
 			url.pathname.startsWith('/v2/') &&
@@ -170,75 +141,78 @@ export default {
 			)
 		) {
 			let repo = '';
-			// 优化正则以支持多级目录 (如 lobehub/lobe-chat-database)
 			const v2Match = url.pathname.match(/^\/v2\/(.+?)(?:\/(manifests|blobs|tags)\/)/);
 			if (v2Match) {
 				repo = v2Match[1];
 			}
 			
+			// 如果配置了账号密码，尝试获取 Token
 			if (repo && DOCKER_AUTH_B64) {
-				// 2.1 向 auth.docker.io 请求 Token
 				const tokenUrl = `${auth_url}/token?service=registry.docker.io&scope=repository:${repo}:pull`;
 				const tokenHeaders = {
 					'User-Agent': getReqHeader("User-Agent"),
 					'Accept': getReqHeader("Accept"),
-					'Authorization': `Basic ${DOCKER_AUTH_B64}` // 这里注入您的账号密码
+					'Authorization': `Basic ${DOCKER_AUTH_B64}`
 				};
 
 				const tokenRes = await fetch(tokenUrl, { headers: tokenHeaders });
 				
-				if (tokenRes.ok) {
-					const tokenData = await tokenRes.json();
-					const token = tokenData.token;
-					
-					// 2.2 使用获取到的 Token 请求 Registry
-					let parameter = {
-						headers: {
-							'Host': hub_host,
-							'User-Agent': getReqHeader("User-Agent"),
-							'Accept': getReqHeader("Accept"),
-							'Accept-Language': getReqHeader("Accept-Language"),
-							'Accept-Encoding': getReqHeader("Accept-Encoding"),
-							'Connection': 'keep-alive',
-							'Cache-Control': 'max-age=0',
-							'Authorization': `Bearer ${token}` // 这里使用 Bearer Token
-						},
-						cacheTtl: 3600
-					};
-					
-					if (request.headers.has("X-Amz-Content-Sha256")) {
-						parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
-					}
+				// 【关键修改】如果获取 Token 失败，直接返回错误，不再尝试匿名请求
+				if (!tokenRes.ok) {
+                    const errText = await tokenRes.text();
+                    console.error(`Token fetch failed: ${tokenRes.status} ${errText}`);
+					return new Response(`[Auth Error] Failed to get token from Docker Hub. Status: ${tokenRes.status}. Msg: ${errText}`, { 
+                        status: tokenRes.status,
+                        headers: { 'Content-Type': 'text/plain' }
+                    });
+				}
 
-					let original_response = await fetch(new Request(url, request), parameter);
-					
-					// 处理响应头
-					let response_headers = original_response.headers;
-					let new_response_headers = new Headers(response_headers);
-					let status = original_response.status;
-					
-					if (new_response_headers.get("Www-Authenticate")) {
-						let auth = new_response_headers.get("Www-Authenticate");
-						let re = new RegExp(auth_url, 'g');
-						new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
-					}
-					if (new_response_headers.get("Location")) {
-						return httpHandler(request, new_response_headers.get("Location"), hub_host);
-					}
-					
-					return new Response(original_response.body, {
-						status,
-						headers: new_response_headers
-					});
-				} else {
-                    // Token 获取失败，打印日志并继续尝试（可能会失败）
-                    console.error("Token fetch failed:", await tokenRes.text());
-                }
+				const tokenData = await tokenRes.json();
+				const token = tokenData.token;
+				
+				// 使用获取到的 Token 请求 Registry
+				let parameter = {
+					headers: {
+						'Host': hub_host,
+						'User-Agent': getReqHeader("User-Agent"),
+						'Accept': getReqHeader("Accept"),
+						'Accept-Language': getReqHeader("Accept-Language"),
+						'Accept-Encoding': getReqHeader("Accept-Encoding"),
+						'Connection': 'keep-alive',
+						'Cache-Control': 'max-age=0',
+						'Authorization': `Bearer ${token}`
+					},
+					cacheTtl: 3600
+				};
+				
+				if (request.headers.has("X-Amz-Content-Sha256")) {
+					parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
+				}
+
+				let original_response = await fetch(new Request(url, request), parameter);
+				
+				let response_headers = original_response.headers;
+				let new_response_headers = new Headers(response_headers);
+				let status = original_response.status;
+				
+				if (new_response_headers.get("Www-Authenticate")) {
+					let auth = new_response_headers.get("Www-Authenticate");
+					let re = new RegExp(auth_url, 'g');
+					new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
+				}
+				if (new_response_headers.get("Location")) {
+					return httpHandler(request, new_response_headers.get("Location"), hub_host);
+				}
+				
+				return new Response(original_response.body, {
+					status,
+					headers: new_response_headers
+				});
 			}
 		}
 
 		// =========================================================
-		// 3. 普通请求 (Fallback)
+		// 3. Fallback (没有配置账号，或非 Docker Hub 请求)
 		// =========================================================
 		let parameter = {
 			headers: {
@@ -253,7 +227,6 @@ export default {
 			cacheTtl: 3600
 		};
 
-		// 只有当客户端自己带了 Auth 时才透传，否则不乱加 Basic Auth
 		if (request.headers.has("Authorization")) {
 			parameter.headers.Authorization = getReqHeader("Authorization");
 		}
